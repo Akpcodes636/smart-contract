@@ -1,16 +1,24 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
-contract FreelanceEscrow {
+contract Escrow {
     // =========================
-    // ENUMS & STRUCTS
+    // Custom errors
     // =========================
+    error AlreadyStaked();
+    error FundsNotStaked();
+    error AllMilestonesPaid();
+    error CancellationRequested();
 
+    // =========================
+    // State
+    // =========================
     enum ProjectState {
-        Initiated,
-        Active,
-        Cancelled,
-        Completed
+        None,            // 0: unused
+        Active,          // 1: default active
+        CancelRequested, // 2: one party requested cancel
+        Cancelled,       // 3: both requested cancel
+        Completed        // 4
     }
 
     struct ContractStatus {
@@ -25,238 +33,152 @@ contract FreelanceEscrow {
         ProjectState projectState;
         uint256 numberOfMilestones;
         uint256 completedMilestones;
-        address agreementAddress;
         address platformWallet;
         uint256 platformFeeBps;
     }
 
-    // =========================
-    // STATE VARIABLES
-    // =========================
+    address payable public client;
+    address payable public freelancer;
+    uint256 public projectPrice;
+    string public title;
+    string public description;
 
-    address payable private client;
-    address payable private freelancer;
-
-    address payable public platformWallet;
-    uint256 public platformFeeBps; // e.g. 200 = 2%
-
-    uint256 private projectPrice;
-    uint256 private numberOfMilestones;
-    uint256 private completedMilestones;
-    uint256 private milestonePayment;
-
-    string private title;
-    string private description;
-
+    bool public clientStaked;
+    bool public clientCancel;
+    bool public freelancerCancel;
     ProjectState public projectState;
-
-    mapping(address => bool) private stakeStatus;
-    mapping(address => bool) private cancelStatus;
-
-    uint256 constant MAX_FEE_BPS = 1000; // max 10%
-
-    // =========================
-    // EVENTS
-    // =========================
-
-    event AgreementStateChanged(
-        address indexed client,
-        address indexed freelancer,
-        ContractStatus status
-    );
-
-    event PlatformPaid(address indexed wallet, uint256 amount);
+    uint256 public numberOfMilestones;
+    uint256 public completedMilestones;
+    address payable public platformWallet;
+    uint256 public platformFeeBps;
 
     // =========================
-    // MODIFIERS
+    // Constructor
     // =========================
-
-    modifier onlyClient() {
-        require(msg.sender == client, "Only client allowed");
-        _;
-    }
-
-    modifier onlyClientOrFreelancer() {
-        require(
-            msg.sender == client || msg.sender == freelancer,
-            "Not authorized"
-        );
-        _;
-    }
-
-    modifier inState(ProjectState state) {
-        require(projectState == state, "Invalid project state");
-        _;
-    }
-
-    modifier escrowLocked() {
-        require(stakeStatus[client], "Funds not staked");
-        _;
-    }
-
-    // =========================
-    // CONSTRUCTOR
-    // =========================
-
     constructor(
         address payable _client,
         address payable _freelancer,
-        uint256 _price,
-        uint256 _milestones,
+        uint256 _projectPrice,
+        uint256 _numberOfMilestones,
         string memory _title,
         string memory _description,
         address payable _platformWallet,
         uint256 _platformFeeBps
     ) {
-        require(_client != _freelancer, "Client and freelancer must differ");
-        require(_price > 0, "Invalid price");
-        require(_milestones > 0, "Invalid milestone count");
-        require(_platformWallet != address(0), "Invalid platform wallet");
-        require(_platformFeeBps <= MAX_FEE_BPS, "Fee too high");
-
         client = _client;
         freelancer = _freelancer;
-        projectPrice = _price;
-        numberOfMilestones = _milestones;
-        milestonePayment = _price / _milestones;
-
+        projectPrice = _projectPrice;
+        numberOfMilestones = _numberOfMilestones;
         title = _title;
         description = _description;
-
         platformWallet = _platformWallet;
         platformFeeBps = _platformFeeBps;
 
-        projectState = ProjectState.Initiated;
-    }
-
-    // =========================
-    // CORE FUNCTIONS
-    // =========================
-
-    function stake() external payable onlyClient inState(ProjectState.Initiated) {
-        require(!stakeStatus[client], "Already staked");
-        require(msg.value == projectPrice, "Incorrect amount");
-
-        stakeStatus[client] = true;
         projectState = ProjectState.Active;
-
-        emit AgreementStateChanged(client, freelancer, getStatus());
     }
 
-    function payByMilestone()
-        external
-        onlyClient
-        inState(ProjectState.Active)
-        escrowLocked
-    {
-        require(completedMilestones < numberOfMilestones, "All milestones paid");
-        require(
-            !cancelStatus[client] && !cancelStatus[freelancer],
-            "Cancellation requested"
-        );
+    // =========================
+    // Actions
+    // =========================
+    function stake() external payable {
+        if (clientStaked) revert AlreadyStaked();
+        require(msg.sender == client, "Only client can stake");
+        require(msg.value == projectPrice, "Incorrect stake amount");
+        clientStaked = true;
+    }
+
+    function payByMilestone() external {
+        if (!clientStaked) revert FundsNotStaked();
+        if (projectState == ProjectState.CancelRequested || projectState == ProjectState.Cancelled) {
+            revert CancellationRequested();
+        }
+        if (completedMilestones >= numberOfMilestones) revert AllMilestonesPaid();
+
+        uint256 payout = (projectPrice / numberOfMilestones) * (10000 - platformFeeBps) / 10000;
+        uint256 platformFee = (projectPrice / numberOfMilestones) - payout;
 
         completedMilestones++;
 
-        uint256 amount = milestonePayment;
+        _payout(freelancer, payout, platformFee);
 
         if (completedMilestones == numberOfMilestones) {
             projectState = ProjectState.Completed;
-            amount = address(this).balance;
         }
-
-        _payout(amount);
-
-        emit AgreementStateChanged(client, freelancer, getStatus());
     }
 
-    function payAtOnce()
-        external
-        onlyClient
-        inState(ProjectState.Active)
-        escrowLocked
-    {
+    function payAtOnce() external {
+        if (!clientStaked) revert FundsNotStaked();
+        if (projectState == ProjectState.CancelRequested || projectState == ProjectState.Cancelled) {
+            revert CancellationRequested();
+        }
+
+        uint256 platformFee = (projectPrice * platformFeeBps) / 10000;
+        uint256 payout = projectPrice - platformFee;
+
+        completedMilestones = numberOfMilestones;
         projectState = ProjectState.Completed;
 
-        uint256 balance = address(this).balance;
-
-        _payout(balance);
-
-        emit AgreementStateChanged(client, freelancer, getStatus());
+        _payout(freelancer, payout, platformFee);
     }
 
-    // =========================
-    // INTERNAL PAYOUT
-    // =========================
+    function requestCancel() external {
+        require(msg.sender == client || msg.sender == freelancer, "Invalid sender");
 
-    function _payout(uint256 grossAmount) internal {
-        uint256 fee = (grossAmount * platformFeeBps) / 10_000;
-        uint256 freelancerAmount = grossAmount - fee;
+        if (msg.sender == client) clientCancel = true;
+        else freelancerCancel = true;
 
-        if (fee > 0) {
-            (bool feeSent, ) = platformWallet.call{value: fee}("");
-            require(feeSent, "Platform fee transfer failed");
-
-            emit PlatformPaid(platformWallet, fee);
-        }
-
-        (bool success, ) = freelancer.call{value: freelancerAmount}("");
-        require(success, "Freelancer transfer failed");
-    }
-
-    // =========================
-    // CANCELLATION
-    // =========================
-
-    function requestCancel()
-        external
-        onlyClientOrFreelancer
-        inState(ProjectState.Active)
-        escrowLocked
-    {
-        cancelStatus[msg.sender] = true;
-
-        if (cancelStatus[client] && cancelStatus[freelancer]) {
+        if (clientCancel && freelancerCancel) {
             projectState = ProjectState.Cancelled;
-
-            uint256 balance = address(this).balance;
-
-            (bool success, ) = client.call{value: balance}("");
-            require(success, "Refund failed");
+        } else if (clientCancel || freelancerCancel) {
+            projectState = ProjectState.CancelRequested;
         }
-
-        emit AgreementStateChanged(client, freelancer, getStatus());
     }
 
-    function revokeCancel()
-        external
-        onlyClientOrFreelancer
-        inState(ProjectState.Active)
-    {
-        cancelStatus[msg.sender] = false;
+    function revokeCancel() external {
+        require(msg.sender == client || msg.sender == freelancer, "Invalid sender");
 
-        emit AgreementStateChanged(client, freelancer, getStatus());
+        if (msg.sender == client) clientCancel = false;
+        else freelancerCancel = false;
+
+        if (!clientCancel && !freelancerCancel) {
+            projectState = ProjectState.Active;
+        }
     }
 
     // =========================
-    // VIEW
+    // View
     // =========================
-
-    function getStatus() public view returns (ContractStatus memory) {
-        return ContractStatus(
-            client,
-            freelancer,
-            projectPrice,
-            title,
-            description,
-            stakeStatus[client],
-            cancelStatus[client],
-            cancelStatus[freelancer],
-            projectState,
-            numberOfMilestones,
-            completedMilestones,
-            address(this),
-            platformWallet,
-            platformFeeBps
-        );
+    function getStatus() external view returns (ContractStatus memory) {
+        return ContractStatus({
+            client: client,
+            freelancer: freelancer,
+            projectPrice: projectPrice,
+            title: title,
+            description: description,
+            clientStaked: clientStaked,
+            clientCancel: clientCancel,
+            freelancerCancel: freelancerCancel,
+            projectState: projectState,
+            numberOfMilestones: numberOfMilestones,
+            completedMilestones: completedMilestones,
+            platformWallet: platformWallet,
+            platformFeeBps: platformFeeBps
+        });
     }
+
+    // =========================
+    // Internal
+    // =========================
+    function _payout(address payable _freelancer, uint256 _payout, uint256 _platformFee) internal {
+        (bool sent1, ) = _freelancer.call{value: _payout}("");
+        require(sent1, "Payout failed");
+
+        (bool sent2, ) = platformWallet.call{value: _platformFee}("");
+        require(sent2, "Platform fee failed");
+    }
+
+    // =========================
+    // Receive
+    // =========================
+    receive() external payable {}
 }
