@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {Escrow} from "../contracts/Escrow.sol"; 
+import {Escrow} from "../contracts/Escrow.sol";
 
 contract EscrowTest is Test {
     Escrow escrow;
@@ -27,7 +27,7 @@ contract EscrowTest is Test {
             "Test Project",
             "Testing Escrow",
             payable(platformWallet),
-            200 // 2% platform fee
+            300
         );
     }
 
@@ -62,7 +62,7 @@ contract EscrowTest is Test {
         escrow.payAtOnce();
 
         Escrow.ContractStatus memory status = escrow.getStatus();
-        assertEq(uint(status.projectState), 4, "Project state should be Completed");
+        assertEq(uint256(status.projectState), 4, "Project state should be Completed");
     }
 
     // =========================
@@ -93,13 +93,13 @@ contract EscrowTest is Test {
         escrow.requestCancel();
         Escrow.ContractStatus memory status1 = escrow.getStatus();
         assertTrue(status1.clientCancel, "Client cancel should be true");
-        assertEq(uint(status1.projectState), 2, "Project should be CancelRequested");
+        assertEq(uint256(status1.projectState), 2, "Project should be CancelRequested");
 
         // Freelancer requests cancel
         vm.prank(freelancer);
         escrow.requestCancel();
         Escrow.ContractStatus memory status2 = escrow.getStatus();
-        assertEq(uint(status2.projectState), 3, "Project should be Cancelled");
+        assertEq(uint256(status2.projectState), 3, "Project should be Cancelled");
     }
 
     function testRevokeCancel() public {
@@ -114,7 +114,7 @@ contract EscrowTest is Test {
 
         Escrow.ContractStatus memory status = escrow.getStatus();
         assertFalse(status.clientCancel, "Client cancel should be false after revoke");
-        assertEq(uint(status.projectState), 1, "Project should remain Active");
+        assertEq(uint256(status.projectState), 1, "Project should remain Active");
     }
 
     function testCannotPayAfterCancelRequested() public {
